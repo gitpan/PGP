@@ -1,12 +1,13 @@
-package PGP;
+package PGP::Pipe;
 
 require 5.000;
 
+use English;
 use Carp;
 use File::Basename;
 use IPC::Open3;
 use Time::Local;
-use Dumper;
+use Data::Dumper;
 
 # $debug = 1;
 
@@ -28,12 +29,26 @@ The PGP module allow a perl script to work with PGP related files.
 
 =cut
 
-# $Log: PGP.pm,v $
+# $Log: Pipe.pm,v $
+# Revision 0.3  1996/08/14 19:04:21  hickey
+# + moved module to PGP::Pipe to prevent conflicts
+# + upgraded to Data::Dumper
+# + added the Sign_Key method to PGP::Keyring (not debugged yet)
+# + PGP::Pipe::Exec places filehandles in caller's package
+#
+# Revision 0.2  1996/01/27  15:40:57  hickey
+# + PGP::Keyring and PGP::Key now inherits PGP object
+# + PGP::Keyring::Find now correctly works (filter on anything)
+# + Timestamps are now correctly reported back to caller
+# + Activated %r (path to keyring) in the PGP::Exec_PGP method
+# + Added support for multiple ID keys. (PGP::Key::Add_ID)
+#
 # Revision 0.1  1996/01/10  02:22:18  hickey
 # Initial alpha release
 #
 
-$VERSION = '$Id: PGP.pm,v 0.1 1996/01/10 02:22:18 hickey Exp hickey $';
+$VERSION = '0.3';
+$RCSID   = '$Id: Pipe.pm,v 0.3 1996/08/14 19:04:21 hickey Exp hickey $';
 
 =item * PGP::new
 
@@ -60,8 +75,23 @@ sub new
   $self = {     PGPPATH         =>      $pgppath,
   		PGPexec		=>	$pgpexec
           };
-          
+  $ENV{PGPPATH} = $pgppath;
+            
   bless $self, $class;
+}
+	
+# The following function was suggested by Alva Couch. Can anyone 
+# think why they would call it rather than the new() method?
+
+# projector function eliminates all non-PGP data and 
+# returns a 'pure' PGP instance. 
+
+sub PGP
+{
+  my $self = shift; 
+  bless {	PGPPATH	=> $self->{PGPPATH}, 
+		PGPexec => $self->{PGPexec}, 
+        }, PGP; 
 }
 
 
@@ -69,7 +99,7 @@ sub Debug
 {
   my (@args) = @_;
 
-  return if (! defined $PGP::debug);
+  return if (! defined $PGP::Pipe::debug);
 
   print STDERR @args, "\n";
 }
@@ -77,17 +107,23 @@ sub Debug
 
 =item * PGP::Exec
 
-	$pid = Exec $pgp $args, $in, $out, $err;
+	$pid = Exec $pgp $args, $in, $out, $err, $nobatchmode;
 
 Execute the PGP command and attach the C<$in>, C<$out>, C<$err> file handles. 
 This should be fine for the moment, but need to look into making
-sure that data is not written to a temporary file anywhere.
+sure that data is not written to a temporary file anywhere. The C<$nobatchmode>
+parameter causes the PGP command to be executed without the +batchmode
+parameter. This seems to only be necessary when a key is being signed.
 
 The $args variable can have several substituted strings:
 
 	%p	PGP path variable
 	%r	Path to PGP keyring
 	%k	Specified user
+
+B<Note:> The above substitutions may change at any time. It is not
+advised that you write applications with substitutions. Almost
+certainly, the next release will not include substitutions.
 
 The file handle variables--C<$in>, C<$out> and C<$err>--are send as
 normal filehandle names, but they reside in the PGP package. For
@@ -104,18 +140,30 @@ C<PGP::FERR> in the orignal procedure that made the call.
 
 sub Exec
 {
-  my ($self, $args, $in, $out, $err) = @_;
+  my ($self, $args, $in, $out, $err, $nobatchmode) = @_;
   my ($pgppath, $pgpcmd, $baseopts);
-
-  $baseopts = '+force +batchmode +verbose=1';
+  my ($fin, $fout, $ferr);
+  
+  if ($nobatchmode)
+    { $baseopts = '+force +verbose=1' }
+   else
+    { $baseopts = '+force +batchmode +verbose=1' };
   
   # Variable substitutions
   $args =~ s/%p/$self->{PGPPATH}/g;
   $args =~ s/%r/$self->{PGPPATH}\/$self->{Keyring}/g;   # PGP::Keyring
   $args =~ s/%k/0x$self->{Keyid}/g;			# PGP::Key
-
+			  
+  # Put the file descriptors in the callers package
+  $fin = (caller)[0] . "::$in";
+  $fout = (caller)[0] . "::$out";
+  $ferr = (caller)[0] . "::$err";
+  
   Debug ("PGP::Exec=$self->{PGPexec} $baseopts $args");
-  $result = open3 ($in, $out, $err, "$self->{PGPexec} $baseopts $args") || croak "PGP command error";
+  
+  # just to make sure that PGPPATH is exported!
+  $ENV{PGPPATH} = $self->{PGPPATH};
+  $result = open3 ($fin, $fout, $ferr, "$self->{PGPexec} $baseopts $args") || croak "PGP command error";
 }
 
 
@@ -173,7 +221,7 @@ information on the the key objects, please see L<"PGP::Key"> section.
 sub Sign
 {
   my ($self, %args) = @_;
-  local ($options, $key, $document);
+  my ($options, $key, $document);
   		    
   Debug ("PGP::Sign Args=", Dumper \%args);
 
@@ -213,7 +261,7 @@ sub Sign
   };
   close (FIN);
 
-  $document = join ('', <FOUT>);
+  $document = join ('', (<FOUT>));
 
   if ($args{Signfile})
   {
@@ -265,49 +313,49 @@ sub Encrypt
   Debug ("PGP::Encrypt Args=", Dumper \%args);
 
   $options = '-f -e';
-  $options .= 'a' if ($args{Armor} == 1);
-  $options .= 's' if (exists $args{Sign});
-  $options .= 'w' if ($args{Wipe} == 1);
-  $options .= 'm' if ($args{Nosave} == 1);
+  $options .= 'a' if ($args{'Armor'} == 1);
+  $options .= 's' if (exists $args{'Sign'});
+  $options .= 'w' if ($args{'Wipe'} == 1);
+  $options .= 'm' if ($args{'Nosave'} == 1);
 
   # process the Key variable
-  if (ref $args{Key} eq 'ARRAY')
+  if (ref $args{'Key'} eq 'ARRAY')
   {
     foreach $key (@keys)
     {		     
-      $options .= " 0x$key->{Keyid}";
+      $options .= " 0x$key->{'Keyid'}";
     };
   } 
   else
   {
-    $options .= " 0x$args{Key}->{Keyid}";
+    $options .= " 0x$args{'Key'}->{'Keyid'}";
   };
 
   # If we are also signing, we need to tell which key and password.
-  $options .= " -u 0x$args{Sign}->{Keyid}" if (defined $args{Sign}->{Keyid});
-  $options .= " -z $args{Password}" if (defined $args{Password});
+  $options .= " -u 0x$args{'Sign'}->{'Keyid'}" if (defined $args{'Sign'}->{'Keyid'});
+  $options .= " -z '$args{'Password'}'" if (defined $args{'Password'});
 
   Debug ("PGP::Encrypt Options=$options");
 
   # procede to send the document to PGP.
   $self->Exec ($options, FIN, FOUT, FERR);
 
-  if ($args{File})
+  if ($args{'File'})
   {
-    open (PLAIN, "< $args{File}") || carp "$args{File} not found";
+    open (PLAIN, "< $args{'File'}") || carp "$args{'File'} not found";
     print FIN <PLAIN>;
     close (PLAIN);
   } else
   {
-    print FIN $args{Text};
+    print FIN $args{'Text'};
   };
   close (FIN);
 
   $document = join ('', <FOUT>);
 
-  if ($args{Encryptfile})
+  if ($args{'Encryptfile'})
   {
-    open (ENCRYPT, "> $args{Encryptfile}") || carp "Can not create $args{Encryptfile}";
+    open (ENCRYPT, "> $args{'Encryptfile'}") || carp "Can not create $args{'Encryptfile'}";
     print ENCRYPT $document;
     close (ENCRYPT);
   };
@@ -354,14 +402,15 @@ sub Decrypt
   		    
   Debug ("PGP::Decrypt Args=", Dumper \%args);
 
-  $options = "-f -z $args{Password}";
+  $options = "-f ";
+  $options = "-z '$args{Password}'" if (defined $args{Password});
 
   Debug ("PGP::Decrypt Options=$options");
 
   # procede to send the document to PGP.
   $self->Exec ($options, FIN, FOUT, FERR);
 
-  if ($args{File})
+  if (defined $args{File})
   {
     open (ENCRYPT, "< $args{File}") || carp "$args{File} not found";
     print FIN <ENCRYPT>;
@@ -387,23 +436,23 @@ sub Decrypt
     
     # gather stats on the decrypted document
     while (<FERR>)
-    {
+    {		       
       # Encryption fields
       /Key ID (\w+)\,/i && do 
         { $key = Find $keyring  Keyid => $1 };
 	
       # Signature fields
       /^Good signature from user "(.+)"/i && do
-      	{ $signature = Find $keyring  Owner => $1 };
+      	{ $signature = Find $keyring  Desc => $1 };
       /^Signature made (\d+)\/(\d+)\/(\d+) (\d+):(\d+)/ && do
-  	{ $time = &timegm (0, $5, $4, $3, $2-1, $1) };
+  	{ $time = &timegm (0, $5, $4, $3, $2-1, ($1 > 1900) ? $1 - 1900 : $1) };
     };  
 
     return ({
 		Text 		=>	$document,
   	     	Signature	=>	$signature,
 	     	Time     	=>	$time,
-	     	Key      	=>	$key  
+	     	Key      	=>	$key
 	    });
   }
   else
@@ -413,13 +462,13 @@ sub Decrypt
 }
 
 
-=item * PGP::Document_Info
+=item * PGP::Info
 
-	\%doc = Document_Info $pgp %args;
+	\%doc = Info $pgp %args;
 
-C<Document_Info> returns an associative array or a reference to an
+C<Info> returns an associative array or a reference to an
 associative array to the caller. This returned structure contains
-information about the document that is sent to the C<Document_Info>
+information about the document that is sent to the C<Info>
 method. The returned structure is fairly straight forward:
 
 	Text		The decrypted document
@@ -427,19 +476,19 @@ method. The returned structure is fairly straight forward:
 	Time		Time document was signed (if any)
 	Key		PGP::Key object used to decrypt document
 
-The C<Document_Info> method currently accepts the following arguments:
+The C<Info> method currently accepts the following arguments:
 
 	File		File to decrypt
 	Text		Document to decrypt
 	
-At this point, we cheat with the C<Document_Info> method. Basically
+At this point, we cheat with the C<Info> method. Basically
 we send the document through the C<Decrypt> method and grab the
 results. 
 
 =cut
 
 
-sub Document_Info
+sub Info
 {
   my ($self, %args) = @_;
 
@@ -457,7 +506,7 @@ The C<PGP::Keyring> object is used to perform key management functions.
 =cut
 
 package PGP::Keyring;
-@ISA = qw(PGP);
+@ISA = qw(PGP::Pipe);
 
 
 =item * PGP::Keyring::new
@@ -470,12 +519,10 @@ package PGP::Keyring;
 
 sub new 
 {   
-  my ($class, $keyring) = @_;
-  my ($pgp);
-   
-  $pgp = new PGP;		# inherit the PGP variables
+  my ($class, $keydir) = @_;
+  my ($pgp) = new PGP::Pipe $keydir;		# inherit the PGP variables
+  
   $self = {	%$pgp,
-		Keyring		=>	$keyring,
   		Keys		=>	[],
 		Modified	=>	1
 	   };
@@ -491,26 +538,55 @@ sub new
 
 =item * PGP::Keyring::Add_Key
 
-	$signature = Add_Key $Keyring $signature;
+	Add_Key $Keyring %args;
 
 Add a signature to the keyring. At this point, there is no error 
 checking or verification that the key has been added.
+
+The C<%args> associative array may contain the following:
+
+	Text		The value is the public key
+	File		File where the public key is stored
 
 =cut
 
 sub Add_Key
 {
-  my ($self, $sign) = @_;
-
-  $self->Exec ("-ka -f %r", FIN, FOUT, FERR);
-  print FIN $sign;
-  close FIN;
+  my ($self, %args) = @_;
+		    
+  # PGP does not seem to like to take a keyring from stdin.
+  # must place everything in a temporary file for processing.
+  
+  if ($args{Text})
+    {
+      open (TEMP, ">/tmp/.pgp.$$");
+      print TEMP $args{Text};
+      close TEMP;
+    }
+   else
+    { 			      
+      # Is this portable? (i.e. PC-based perl)
+      system ("$Config{'cp'} $args{File} /tmp/.pgp.$$");
+    };
+    
+  $self->Exec ("-ka /tmp/.pgp.$$", FIN, FOUT, FERR);
+      
+#   # send the key to the PGP process
+#   if ($args{Text})
+#     { print FIN "$args{Text}\n" }
+#    else
+#     {
+#       open (KEY, "<$args{File}");
+#       print FIN <KEY>;
+#       close KEY;
+#     };
+#   close FIN;
   
   $self->{Modified}++;
 }
       
 
-=item * PGP::Remove_Key
+=item * PGP::Keyring::Remove_Key
 
 	Remove_Key $Keyring $key;
 
@@ -523,13 +599,13 @@ sub Remove_Key
 { 
   my ($self, $key) = @_;
   
-  $self->Exec ("-kr -f 0x$key->{Keyid} %r", FIN, FOUT, FERR);
+  $self->Exec ("-kr -f 0x$key->{Keyid}", FIN, FOUT, FERR);
   							   
   $self->{Modified}++;
 }
 
 
-=item * PGP::Extract_Key
+=item * PGP::Keyring::Extract_Key
 
 	$key = Extract_Key $Keyring $keyobj;
 
@@ -541,16 +617,65 @@ extracting the key.
 
 sub Extract_Key
 {
-  my ($self, $key) = @_;
+  my ($self, %args) = @_;
   
-  $self->Exec ("-kxa -f 0x$key->{Keyid} %r", FIN, FOUT, FERR);
+  $self->Exec ("-kxa -f 0x$args{Keyid}", FIN, FOUT, FERR);
   
-  @key = <PGP::FOUT>;
+  @key = <FOUT>;
   return (join ('', @key));
 }
 
 
-=item * PGP::Generate_Key
+=item * PGP::Keyring::Sign_Key
+
+	Sign_Key $Keyring %args;
+
+This method will sign a designated key with the 
+
+
+=cut
+
+sub Sign_Key
+{
+  my ($self, %args) = @_;
+  
+  # We absolutely need a password to continue!		 
+  return if (! exists $args{Password});
+  
+  $result = $self->Exec ("-ks 0x$args{Keyid}", FIN, FOUT, FERR, 1);
+  
+  open (KEYB, ">/dev/tty");
+  				       
+  # now we get to act as a user to get the key signed!
+  while ($output = <FOUT>)
+  { 	       
+    PGP::Pipe::Debug ("FOUT: $output");
+    last if ($output =~ /user ID/ );
+  };
+    
+  print KEYB "y\n";     # say yes it is the key we want
+  print "Sent a 'y' keystroke...";
+    
+  while ($output = <FOUT>)
+  {			 
+    PGP::Pipe::Debug ("FOUT: $output");
+    last if ($output =~ /Enter pass phrase:/);
+  };
+    
+  print KEYB "$args{Password}\n";
+  
+  # right now, we just hope that it signed it fine!			
+  close (FIN);
+  close (FOUT);
+  close (FERR);
+  # Keyring has been modified.
+  $self->{Modified}++;
+  
+  $self->Extract_Key (Keyid => $args{Keyid});
+}
+
+
+=item * PGP::Keyring::Generate_Key
 
 	Generate_Key $Keyring;
 
@@ -563,12 +688,13 @@ present in the first rev of code. It is also subject to change.
 sub Generate_Key
 {
   my ($self) = shift;
-  
+
+# be sure to use +nomanual as an option  
   $self->{Modified}++;
 }
 
 
-=item * PGP::Revoke_Key
+=item * PGP::Keyring::Revoke_Key
 
 	$certificate = Revoke_Key $Keyring $Keyobj;
 
@@ -611,23 +737,27 @@ sub List_Keys
   { 
     return (wantarray ? @{$self->{Keys}} : $self->{Keys});
   };
-  
-  $self->Exec ("-kc %r", FIN, FOUT, FERR);  
+
+  # clear the old array and get a list of all the keys again
+  $self->{Keys} = undef;  
+  $self->Exec ("-kc", FIN, FOUT, FERR);  
   	    
-  while (<PGP::FOUT>)
+  while (<FOUT>)
   {
     # public key entry
     /^pub/ && do 
-      { push (@{$self->{Keys}}, PGP::Key->new ($_)) };
+      { push (@{$self->{Keys}}, PGP::Key->new ($_)) };		  
+    /^sig/ && do
+      { $self->{Keys}->[$#{$self->{Keys}}]->Add_Sig ($_) };
     # more IDs to current key?
-    /^\w+(.+)$/ && do 
+    /^\s{30,32}(.+)$/ && do 
       { $self->{Keys}->[$#{$self->{Keys}}]->AddID ($1) };
       
     # public key trust entries follow
     last if (/^\s+KeyID\s+Trust\s+Validity\s+User ID/);  
   };
 	      
-  while (<PGP::FOUT>)
+  while (<FOUT>)
   { 
     # valid entry?		   
     /^..(\w+)\s+(\w+)\s+(\w+)\s+(.+)/ && do 
@@ -653,7 +783,23 @@ sub List_Keys
 	\@keys = Find $keyring %criteria;
 	$key = Find $keyring %criteria; (Single match)
 
-Function to locate a single key.
+Function to locate a keys matching some criteria. This is not 
+implemented as nicely as it should be (read kludge). The 
+C<%criteria> array is used to specify what keys are to be selected.
+The keys for the C<%criteria> array are as follows:
+
+	Keyid		Key with specifed keyid
+	Owner		Name of the owner of the key
+	Email		Email address of owner
+	Bits		Size of the key in bits
+	Date		Date that the key was generated
+	Desc		Owner and Email keys combined
+
+The values for each specifed key (assocative array) are compared
+using a case-insensitive regular expression. This means that 
+only a portion of the key data needs to be specified to have it 
+selected. This also means that specifing too little criteria
+can cause several keys to be selected.
 
 =cut 
 
@@ -662,13 +808,27 @@ sub Find
 {
   my ($self, %criteria) = @_;
   my ($key, @match, $crit);
-  
+
   NONMATCH:
   foreach $key (@{$self->{Keys}})
   {		     		
     foreach $crit (keys %criteria)
     {
-      if (ref ($key->{$crit}) ne 'ARRAY')
+      if ($crit eq 'Desc')
+      {
+	for ($[ .. $#{$key->{Owner}})
+	{ 
+ 	  ($keydesc = "$key->{Owner}->[$_] $key->{Email}->[$_]") =~ tr/a-zA-Z0-9@.!\-//cd;
+          $keydesc =~ tr/ 	/ /s;
+					       
+	  $desc = $criteria{$crit};
+	  $desc =~ tr/a-zA-Z0-9@.!\-//cd;       # update the tr/// above too!
+	  $desc =~ tr/ 	/ /s;
+	
+          next NONMATCH if ($keydesc !~ /$desc/i);
+        };
+      }
+       elsif (ref ($key->{$crit}) ne 'ARRAY')
         { next NONMATCH if ($key->{$crit} !~ /$criteria{$crit}/i) }
        else 
         {
@@ -678,7 +838,8 @@ sub Find
     };
     push (@match, $key);
   };
-  
+
+  # return a scalar if there is only one match  
   return ($match[$[]) if ($#match == 0);
   return (wantarray ? @match : \@match);
 }  
@@ -687,11 +848,10 @@ sub Find
 
 
 package PGP::Key;
-@ISA = qw(PGP);
+@ISA = qw(PGP::Pipe);
 
-	   
-use Time::Local;
-
+use Time::Local;			
+use Dumper;
 
 =head2 PGP::Key
 
@@ -724,20 +884,22 @@ sub new
   my ($class, $keyline) = @_;
   my ($bits, $keyid, $date, $owner, $pgp);
   
-  chomp $key;
-  ($bits, $keyid, $date, $owner) = &keyparse ($keyline);
+  chomp $keyline;
+  ($bits, $keyid, $date, $owner) = PGP::Key->_keyparse ($keyline);
   			    
-  $pgp = new PGP;		# inherit the PGP variables
+  $pgp = new PGP::Pipe;		# inherit the PGP variables
   $self = { %$pgp,
-	    Bits	=>	$bits,
+	    Bits       	=>	$bits,
   	    Keyid	=>	$keyid,
-	    Date	=>	$date
+	    Date	=>	$date,
+	    Owner	=>	[],
+	    Email	=>	[]
 	  };	       		     
 
   bless $self, $class;		  
   	
   # Add on the ID information to the key object
-  $self->Add_ID ($desc);
+  $self->Add_ID ($owner);
   
   $self; 
 }
@@ -780,20 +942,19 @@ sub Add_ID
       };
 }
 
-	      
-sub keyparse
+
+=item * PGP::Key::Add_Sig
+
+
+
+=cut
+
+sub Add_Sig
 {
-  my ($keyline) = shift;
-  my ($bits, $keyid, $yr, $mon, $day, $desc);
-			
-  ($bits, $keyid, $yr, $mon, $day, $desc) = 
-      ($keyline =~ /^pub\s+(\d+)\/(\w+)\s+(\d+)\/(\d+)\/(\d+)\s+(.+)$/);
- 
-  $date = &timegm (0, 0, 0, $day, $--mon, $year);
-  				     
-  return ($bits, $keyid, $date, $desc);
+  my ($self, $line) = @_;
+  
+  
 }
-				 
 
 
 =item * PGP::Key::Trust
@@ -856,15 +1017,80 @@ sub Fingerprint
   return $fingerprint;
 };
 
-			      
-sub dump
+
+=item * PGP::Key::Format
+
+	$formatted_text = Format $key %args;
+
+This method will return a formatted text string for a key. It 
+is essentially the same as do a 'pgp -kv' or 'pgp -kvv' for
+a key object. Currently the only argument that C<Format> will 
+recognize is the C<Verbose> argument. The C<Verbose> parameter
+will list the signatures that have certified the current 
+key object. 
+
+=cut
+
+sub Format
 {
-  my $self = shift;
+  my ($self, %args) = @_;
+  my ($day, $month, $year) = $self->_date ($self->{Date});
+
+  $text = sprintf ("pub  %4d/%s %4d/%02d/%02d %s\n", $self->{Bits}, $self->{Keyid},  
+  		$year, ($month+0), ($day+0), 
+		$self->_desc ($self->{Owner}->[0], $self->{Email}->[0]));
+		
+		
+  my $index = 1;
+  while ($self->{Owner}->[$index] || $self->{Email}->[$index])
+  {
+    $text .= sprintf ("%s%s\n", ' ' x 30, $self->_desc ($self->{Owner}->[$index],
+    			$self->{Email}->[$index]));
+    if (exists $args{Verbose})      # produce a list of signatures
+    {
+    
+    
+    };
+    $index++;
+  };
   
-  print "Key: ", $self->{Keyid}, " :: ", $self->{Owner}, " <", $self->{Email}, ">\n";
-  print "\tSize: ", $self->{Bits}, "\tTrust: ", $self->{Trust};
-  print "\t\tValidity: ", $self->{Validity}, "\n";
+  $text;
 }
+
+
+	      
+sub _keyparse
+{
+  my ($self, $keyline) = @_;
+  my ($bits, $keyid, $year, $mon, $day, $desc);
+			
+  ($bits, $keyid, $year, $mon, $day, $desc) = 
+      ($keyline =~ /^pub\s+(\d+)\/(\w+)\s+(\d+)\/(\d+)\/(\d+)\s+(.+)$/);
+ 
+  $date = &Time::Local::timegm (0, 0, 0, $day, $mon, $year-1900);
+  				     
+  return ($bits, $keyid, $date, $desc);
+}
+				 
+
+sub _date
+{     
+  my $self = shift;
+  my (@tm) = gmtime (shift);
+  return ($tm[3], $tm[4], $tm[5]+1900);
+}
+
+				    
+sub _desc
+{
+  my ($self, $owner, $email) = @_;
+  
+  return ("$owner <$email>") if ($owner && $email);
+  return ("$owner") if (!$email);
+  return ("$email") if (!$owner);
+  return ("*** No ID on key ***");
+}
+
 
 =head2 Known Bugs and Limitations
 
