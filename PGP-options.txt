@@ -1,0 +1,23 @@
+PGP Options
+
+	-w		wipe file from disk
+	-d		decrypt file
+	-p		extract plain text from file
+	-e		encrypt file
+	-f		"filter" mode
+	-z PASSWORD	password for secret key	     
+	-b		detach a signature
+
+	+batchmode	non-interactive mode
+	+force		answer "yes" to all questions
+	+tmp=TMP	use TMP as temporary space
+	+language=LANG	set language
+	+textmode=on	same as -t
+	+armor=on	same as -a (ascii armor)
+	+armorlines=#	split armor'd files at # lines
+	+keepbinary=on	
+	+compress=on	enable data compression
+	+clearsig=on	leave the signed text as text
+	+verbose-{012}	set the verbose level
+	
+	
