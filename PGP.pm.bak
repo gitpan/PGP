@@ -396,7 +396,7 @@ sub Decrypt
       /^Good signature from user "(.+)"/i && do
       	{ $signature = Find $keyring  Owner => $1 };
       /^Signature made (\d+)\/(\d+)\/(\d+) (\d+):(\d+)/ && do
-  	{ $time = &timegm (0, $5, $4, $3, $2-1, $1) };
+  	{ $time = &timegm (0, $5, $4, $3, $2, $1) };
     };  
 
     return ({
